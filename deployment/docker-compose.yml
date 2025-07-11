@@ -1,0 +1,242 @@
+version: '3.8'
+
+services:
+  # 主應用服務
+  activity-tracker-bot:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    container_name: activity-tracker-bot
+    restart: unless-stopped
+    
+    # 環境變數
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - DATABASE_PATH=/app/data/activities.db
+      - REPORT_BASE_DIR=/app/statistics
+      - TIMEZONE=Asia/Taipei
+      - LOG_LEVEL=info
+      - REDIS_URL=redis://redis:6379
+    
+    # 環境變數檔案
+    env_file:
+      - .env
+    
+    # Volume 掛載
+    volumes:
+      - app_data:/app/data
+      - app_statistics:/app/statistics
+      - app_logs:/app/logs
+      - ./config:/app/config:ro
+    
+    # 端口映射
+    ports:
+      - "${PORT:-3000}:3000"
+    
+    # 依賴服務
+    depends_on:
+      redis:
+        condition: service_healthy
+    
+    # 網路配置
+    networks:
+      - app-network
+    
+    # 健康檢查
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # 資源限制
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # 日誌配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis 快取服務
+  redis:
+    image: redis:7-alpine
+    container_name: activity-tracker-redis
+    restart: unless-stopped
+    
+    # 命令參數
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    
+    # Volume 掛載
+    volumes:
+      - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    
+    # 端口映射（僅內部網路）
+    expose:
+      - "6379"
+    
+    # 網路配置
+    networks:
+      - app-network
+    
+    # 健康檢查
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    
+    # 資源限制
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
+    
+    # 日誌配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # 日誌監控服務（可選）
+  logrotate:
+    image: linkyard/docker-logrotate
+    container_name: activity-tracker-logrotate
+    restart: unless-stopped
+    
+    # Volume 掛載
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    # 環境變數
+    environment:
+      - LOGROTATE_INTERVAL=daily
+      - LOGROTATE_COPIES=7
+      - LOGROTATE_SIZE=10M
+    
+    # 網路配置
+    networks:
+      - app-network
+
+  # 監控服務（可選）
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: activity-tracker-prometheus
+    restart: unless-stopped
+    
+    # 命令參數
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    
+    # Volume 掛載
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    
+    # 端口映射
+    ports:
+      - "9090:9090"
+    
+    # 網路配置
+    networks:
+      - app-network
+    
+    # 條件啟動
+    profiles:
+      - monitoring
+
+  # Grafana 監控面板（可選）
+  grafana:
+    image: grafana/grafana:latest
+    container_name: activity-tracker-grafana
+    restart: unless-stopped
+    
+    # 環境變數
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    
+    # Volume 掛載
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    
+    # 端口映射
+    ports:
+      - "3001:3000"
+    
+    # 依賴服務
+    depends_on:
+      - prometheus
+    
+    # 網路配置
+    networks:
+      - app-network
+    
+    # 條件啟動
+    profiles:
+      - monitoring
+
+# Volume 定義
+volumes:
+  app_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data
+  
+  app_statistics:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./statistics
+  
+  app_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./logs
+  
+  redis_data:
+    driver: local
+  
+  prometheus_data:
+    driver: local
+  
+  grafana_data:
+    driver: local
+
+# 網路定義
+networks:
+  app-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
