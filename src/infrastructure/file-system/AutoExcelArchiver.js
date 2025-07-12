@@ -26,9 +26,9 @@ class AutoExcelArchiver {
             // 確保存檔目錄存在
             await this.ensureArchiveDirectory();
             
-            // 獲取昨天的日期（因為是晚上11點執行，存檔昨天的數據）
-            const yesterday = moment().tz(this.timezone).subtract(1, 'day');
-            const targetDate = yesterday.format('YYYY-MM-DD');
+            // 獲取今天的日期（晚上11點執行，存檔今天的數據）
+            const today = moment().tz(this.timezone);
+            const targetDate = today.format('YYYY-MM-DD');
             
             console.log(`📊 目標日期: ${targetDate}`);
             

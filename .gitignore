@@ -46,6 +46,11 @@ jspm_packages/
 
 # dotenv environment variables file
 .env
+.env.*
+
+# Security: Any file that might contain tokens
+*token*
+*secret*
 
 # IDE files
 .vscode/

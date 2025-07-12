@@ -96,14 +96,39 @@ class SimpleDatabaseConnection {
                 return [{ count: table.length }];
             }
 
-            if (sql.includes('WHERE user_id = ? AND chat_id = ?')) {
-                return table.filter(row => row.user_id === params[0] && row.chat_id === params[1]);
+            // 處理 WHERE 條件
+            if (sql.includes('WHERE')) {
+                return this.filterTableByWhere(table, sql, params);
             }
 
             return table;
         } catch (error) {
             console.error('查詢執行失敗:', error);
             return [];
+        }
+    }
+
+    /**
+     * 根據 WHERE 條件過濾表格數據
+     */
+    filterTableByWhere(table, sql, params) {
+        try {
+            // 清理並提取 WHERE 子句
+            const cleanSql = sql.replace(/\s+/g, ' ').trim();
+            const whereMatch = cleanSql.match(/WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)/i);
+            if (!whereMatch) {
+                return table;
+            }
+
+            const whereClause = whereMatch[1];
+            const conditions = this.parseWhereClause(whereClause, params);
+
+            return table.filter(row => {
+                return this.matchesWhereConditions(row, conditions);
+            });
+        } catch (error) {
+            console.error('WHERE 條件過濾失敗:', error);
+            return table;
         }
     }
 
@@ -300,8 +325,122 @@ class SimpleDatabaseConnection {
     }
 
     handleUpdate(tableName, sql, params) {
-        // 簡化實現，暫時不處理 UPDATE
-        return { changes: 0 };
+        // 實現 UPDATE 操作
+        try {
+            // 解析 UPDATE SQL 語句（支援多行）
+            const cleanSql = sql.replace(/\s+/g, ' ').trim();
+            const updateMatch = cleanSql.match(/UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)/i);
+            if (!updateMatch) {
+                console.error('❌ 無法解析 UPDATE SQL:', cleanSql);
+                return { changes: 0 };
+            }
+
+            const [, table, setClause, whereClause] = updateMatch;
+            
+            // 確保表名一致
+            if (table !== tableName) {
+                console.error('❌ 表名不匹配:', table, 'vs', tableName);
+                return { changes: 0 };
+            }
+
+            // 載入現有資料
+            const data = this.data;
+            
+            if (!data[tableName]) {
+                console.error('❌ 表不存在:', tableName);
+                return { changes: 0 };
+            }
+
+            // 解析 WHERE 條件
+            const whereConditions = this.parseWhereClause(whereClause, params);
+            
+            // 解析 SET 條件
+            const setValues = this.parseSetClause(setClause, params);
+            
+            // 找到要更新的記錄
+            let updatedCount = 0;
+            const records = data[tableName];
+            
+            for (let i = 0; i < records.length; i++) {
+                const record = records[i];
+                
+                // 檢查是否符合 WHERE 條件
+                if (this.matchesWhereConditions(record, whereConditions)) {
+                    // 更新記錄
+                    Object.assign(record, setValues);
+                    record.updated_at = new Date().toISOString();
+                    updatedCount++;
+                }
+            }
+            
+            // 如果有更新，保存資料
+            if (updatedCount > 0) {
+                this.saveToFile();
+                console.log(`✅ ${tableName} 更新成功，影響 ${updatedCount} 筆記錄`);
+            } else {
+                console.log(`ℹ️ ${tableName} 沒有找到符合條件的記錄進行更新`);
+            }
+            
+            return { changes: updatedCount };
+            
+        } catch (error) {
+            console.error('❌ UPDATE 操作失敗:', error.message);
+            return { changes: 0 };
+        }
+    }
+
+    // 解析 WHERE 子句
+    parseWhereClause(whereClause, params) {
+        const conditions = {};
+        const parts = whereClause.split(/\s+AND\s+/i);
+        
+        // 對於 UPDATE 語句，WHERE 參數通常在最後
+        const whereParamIndex = params.length - parts.length;
+        
+        parts.forEach((part, index) => {
+            const match = part.match(/(\w+)\s*=\s*\?/);
+            if (match) {
+                const fieldName = match[1];
+                const paramIndex = whereParamIndex + index;
+                if (paramIndex >= 0 && paramIndex < params.length) {
+                    conditions[fieldName] = params[paramIndex];
+                }
+            }
+        });
+        
+        return conditions;
+    }
+
+    // 解析 SET 子句
+    parseSetClause(setClause, params) {
+        const values = {};
+        const assignments = setClause.split(',');
+        
+        // SET 參數從 0 開始，排除 WHERE 參數
+        const whereParamCount = 1; // 通常 WHERE 只有一個參數（chat_id）
+        const setParamCount = params.length - whereParamCount;
+        
+        let paramIndex = 0;
+        assignments.forEach(assignment => {
+            const match = assignment.trim().match(/(\w+)\s*=\s*\?/);
+            if (match && paramIndex < setParamCount) {
+                const fieldName = match[1];
+                values[fieldName] = params[paramIndex];
+                paramIndex++;
+            }
+        });
+        
+        return values;
+    }
+
+    // 檢查記錄是否符合 WHERE 條件
+    matchesWhereConditions(record, conditions) {
+        for (const [field, value] of Object.entries(conditions)) {
+            if (record[field] != value) { // 使用 != 而非 !== 以允許類型轉換
+                return false;
+            }
+        }
+        return true;
     }
 }
 

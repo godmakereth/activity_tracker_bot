@@ -3,7 +3,18 @@
  * 使用新的架構和依賴注入，整合所有功能模組
  */
 
-require('dotenv').config();
+// 確保環境變數加載
+const path = require('path');
+const dotenv = require('dotenv');
+const envPath = path.join(__dirname, '..', '.env');
+console.log('🔧 加載環境變數，路徑:', envPath);
+const result = dotenv.config({ path: envPath });
+if (result.error) {
+    console.error('❌ 加載 .env 失敗:', result.error);
+} else {
+    console.log('✅ .env 加載成功，包含', Object.keys(result.parsed || {}).length, '個變數');
+    console.log('✅ TELEGRAM_BOT_TOKEN 已加載:', !!result.parsed?.TELEGRAM_BOT_TOKEN);
+}
 const moment = require('moment-timezone');
 
 const { container } = require('./shared/DependencyContainer');
@@ -136,22 +147,36 @@ class App {
             return new GenerateReportUseCase(activityRepo, chatRepo, reportGen);
         }, ['activityRepository', 'chatRepository', 'reportGenerator']);
 
-        // 註冊 Telegram Bot
-        container.singleton('telegramBot', (config) => {
+        // 註冊 Telegram Bot（非單例，按需實例化）
+        container.register('telegramBot', () => {
             const TelegramBot = require('node-telegram-bot-api');
+            
+            // 調試環境變數
+            console.log('🔍 調試環境變數:');
+            console.log('  - process.cwd():', process.cwd());
+            console.log('  - __dirname:', __dirname);
+            console.log('  - NODE_ENV:', process.env.NODE_ENV);
+            console.log('  - Token exists:', !!process.env.TELEGRAM_BOT_TOKEN);
+            console.log('  - Token length:', process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.length : 'undefined');
+            console.log('  - Token value (first 10 chars):', process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.substring(0, 10) + '...' : 'undefined');
+            
             const token = process.env.TELEGRAM_BOT_TOKEN;
             
             if (!token || token === 'your_bot_token_here') {
+                console.error('❌ Token 驗證失敗');
+                console.error('   Token:', token ? `${token.substring(0, 10)}...` : 'undefined');
+                console.error('   所有環境變數:', Object.keys(process.env).filter(k => k.includes('TELEGRAM')));
                 throw new ValidationException('TELEGRAM_BOT_TOKEN 環境變數未設置或仍為預設值');
             }
             
-            // 配置 Bot 選項以解決網路連接問題
+            // 配置 Bot 選項 - 解決 409 衝突問題
             const botOptions = {
                 polling: {
-                    interval: 1000,
-                    autoStart: true,
+                    interval: 2000,   // 增加輪詢間隔
+                    autoStart: false, // 手動啟動避免重複實例
                     params: {
-                        timeout: 10
+                        timeout: 10,
+                        allowed_updates: [] // 接收所有類型的更新
                     }
                 },
                 request: {
@@ -161,11 +186,12 @@ class App {
                     headers: {
                         'User-Agent': 'activity-tracker-bot/1.0.0'
                     }
-                }
+                },
+                filepath: false // 禁用文件下載
             };
             
             return new TelegramBot(token, botOptions);
-        }, ['config']);
+        });
     }
 
     /**
@@ -199,32 +225,118 @@ class App {
      * 初始化 Telegram Bot
      */
     async initializeTelegramBot() {
+        console.log('🤖 開始初始化 Telegram Bot...');
+        
+        // 再次檢查環境變數
+        console.log('🔍 initializeTelegramBot 中的環境變數檢查:');
+        console.log('  - Token exists:', !!process.env.TELEGRAM_BOT_TOKEN);
+        console.log('  - Token:', process.env.TELEGRAM_BOT_TOKEN ? 'Found' : 'Not found');
+        
         this.bot = container.get('telegramBot');
         
         // 設定錯誤處理
         this.bot.on('error', (error) => {
             console.error('❌ Telegram Bot 錯誤:', error.message);
+            if (error.message.includes('409')) {
+                console.log('🚨 檢測到 409 衝突，將清理並重新啟動...');
+                this.handleBotConflict();
+            }
         });
 
         this.bot.on('polling_error', (error) => {
             console.error('❌ Telegram Bot 輪詢錯誤:', error.message);
             
-            // 處理網路連接錯誤並自動重試
+            // 處理 409 衝突錯誤
+            if (error.message.includes('409') || error.message.includes('Conflict')) {
+                console.log('🚨 檢測到 409 衝突，停止輪詢並清理...');
+                this.handleBotConflict();
+                return;
+            }
+            
+            // 處理其他網路連接錯誤
             if (error.code === 'EFATAL' || error.code === 'ETIMEDOUT' || error.code === 'ECONNRESET') {
                 console.log('🔄 檢測到網路錯誤，5秒後重新啟動 polling...');
                 setTimeout(() => {
-                    try {
-                        this.bot.startPolling();
-                        console.log('✅ Polling 已重新啟動');
-                    } catch (restartError) {
-                        console.error('❌ 重新啟動 polling 失敗:', restartError.message);
-                    }
+                    this.restartBotPolling();
                 }, 5000);
             }
         });
 
         // 設定訊息處理
         this.setupMessageHandlers();
+        
+        // 手動啟動輪詢
+        try {
+            await this.startBotPolling();
+        } catch (error) {
+            console.error('❌ 啟動 Bot 輪詢失敗:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * 處理 Bot 衝突
+     */
+    async handleBotConflict() {
+        try {
+            console.log('🧹 清理 Bot 實例...');
+            
+            // 停止當前輪詢
+            if (this.bot) {
+                await this.bot.stopPolling();
+                console.log('✅ 已停止當前輪詢');
+            }
+            
+            // 等待一段時間讓其他實例釋放
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // 嘗試重新啟動
+            await this.restartBotPolling();
+            
+        } catch (error) {
+            console.error('❌ 處理 Bot 衝突失敗:', error.message);
+        }
+    }
+
+    /**
+     * 啟動 Bot 輪詢
+     */
+    async startBotPolling() {
+        try {
+            console.log('🚀 啟動 Bot 輪詢...');
+            await this.bot.startPolling();
+            console.log('✅ Bot 輪詢已啟動');
+        } catch (error) {
+            if (error.message.includes('409')) {
+                throw new Error('Bot 已被其他實例使用，請確保只有一個實例在運行');
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * 重新啟動 Bot 輪詢
+     */
+    async restartBotPolling() {
+        try {
+            console.log('🔄 重新啟動 Bot 輪詢...');
+            
+            // 確保先停止
+            try {
+                await this.bot.stopPolling();
+            } catch (stopError) {
+                console.log('ℹ️ 停止輪詢時的錯誤（可能已停止）:', stopError.message);
+            }
+            
+            // 等待一段時間
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // 重新啟動
+            await this.startBotPolling();
+            
+        } catch (error) {
+            console.error('❌ 重新啟動 Bot 輪詢失敗:', error.message);
+        }
     }
 
     /**
@@ -1080,7 +1192,13 @@ class App {
 
             // 停止 Telegram Bot
             if (this.bot) {
-                await this.bot.stopPolling();
+                console.log('🛑 正在關閉 Telegram Bot...');
+                try {
+                    await this.bot.stopPolling();
+                    console.log('✅ Telegram Bot 已關閉');
+                } catch (error) {
+                    console.log('ℹ️ 關閉 Bot 時的錯誤（可能已停止）:', error.message);
+                }
             }
 
             // 停止 Web 服務器

@@ -6,23 +6,64 @@
 console.log('🚀 Telegram Activity Tracker Bot - Windows 啟動器');
 console.log('================================================');
 
-// 1. 設置環境變數
-console.log('\n📝 設置環境變數...');
-process.env.TELEGRAM_BOT_TOKEN = '8134343577:AAF_U30xi1Gw1aDk05MdIgzbX8i_eit_XKo';
-process.env.DATABASE_PATH = './data/activities.db';
-process.env.REPORT_BASE_DIR = './statistics';
-process.env.REPORT_TIME = '23:00';
-process.env.TIMEZONE = 'Asia/Taipei';
-process.env.NODE_ENV = 'production';
-process.env.PORT = '3000';
-process.env.LOG_LEVEL = 'info';
+// 1. 載入環境變數
+console.log('\n📝 載入環境變數...');
+const path = require('path');
+const fs = require('fs');
+const envPath = path.join(__dirname, '.env');
+
+// 檢查 .env 檔案是否存在
+if (!fs.existsSync(envPath)) {
+    console.error('❌ .env 檔案不存在:', envPath);
+    process.exit(1);
+}
+
+// 強制清除現有的 TELEGRAM_BOT_TOKEN
+delete process.env.TELEGRAM_BOT_TOKEN;
+
+// 載入 .env 檔案
+const result = require('dotenv').config({ path: envPath });
+if (result.error) {
+    console.error('❌ 載入 .env 失敗:', result.error);
+    process.exit(1);
+}
+
+console.log('📂 實際載入的 .env 路徑:', envPath);
+console.log('🔧 載入的變數數量:', Object.keys(result.parsed || {}).length);
+
+// 顯示載入的 Token 前綴（調試用）
+console.log('🔍 載入的 Token 前綴:', process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.substring(0, 10) + '...' : 'undefined');
+
+// 直接從檔案讀取驗證
+const envContent = fs.readFileSync(envPath, 'utf8');
+const tokenLine = envContent.split('\n').find(line => line.startsWith('TELEGRAM_BOT_TOKEN='));
+if (tokenLine) {
+    const fileToken = tokenLine.split('=')[1];
+    console.log('📝 檔案中的 Token 前綴:', fileToken ? fileToken.substring(0, 10) + '...' : 'undefined');
+}
+
+// 檢查必要的環境變數
+if (!process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN === 'your_bot_token_here') {
+    console.error('❌ TELEGRAM_BOT_TOKEN 未設置或仍為預設值');
+    console.log('💡 請在 .env 檔案中設置 TELEGRAM_BOT_TOKEN');
+    console.log('💡 當前 .env 路徑:', envPath);
+    process.exit(1);
+}
+
+// 設置其他環境變數（如果 .env 中沒有的話）
+process.env.DATABASE_PATH = process.env.DATABASE_PATH || './data/activities.db';
+process.env.REPORT_BASE_DIR = process.env.REPORT_BASE_DIR || './statistics';
+process.env.REPORT_TIME = process.env.REPORT_TIME || '23:00';
+process.env.TIMEZONE = process.env.TIMEZONE || 'Asia/Taipei';
+process.env.NODE_ENV = process.env.NODE_ENV || 'production';
+process.env.PORT = process.env.PORT || '3000';
+process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
 console.log('✅ 環境變數設置完成');
 console.log('🔍 Bot Token:', process.env.TELEGRAM_BOT_TOKEN.substring(0, 10) + '...');
 
 // 2. 確保目錄存在
 console.log('\n📁 檢查必要目錄...');
-const fs = require('fs');
 const directories = ['data', 'statistics', 'logs', 'archives', 'archives/excel'];
 directories.forEach(dir => {
     if (!fs.existsSync(dir)) {
@@ -33,13 +74,7 @@ directories.forEach(dir => {
     }
 });
 
-// 3. 載入 dotenv (可選，因為我們已經直接設置了)
-try {
-    require('dotenv').config();
-    console.log('✅ dotenv 載入完成');
-} catch (error) {
-    console.log('ℹ️ dotenv 載入失敗，使用直接設置的環境變數');
-}
+// 3. 環境變數已載入，跳過重複載入
 
 // 4. 載入並啟動應用程式
 console.log('\n🤖 正在啟動 Telegram Bot...');
